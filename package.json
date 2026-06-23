@@ -1,0 +1,14 @@
+{
+  "name": "new-codeblock-plugins",
+  "version": "1.0.0",
+  "description": "Custom Markdown code block UI cards for Bunny, Kettu, and Vendetta Discord mobile.",
+  "main": "index.js",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": ["bunny", "kettu", "vendetta", "discord-mobile", "markdown", "plugin"],
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.8.0"
+  }
+}
