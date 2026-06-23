@@ -51,26 +51,26 @@ Discord may cache its Markdown renderer early. Enable this plugin, restart Disco
 
 ## Test messages
 
-```md
+````md
 ```info
 Hello info box
 ```
-```
+````
 
-```md
+````md
 ```warn
 Cảnh báo test UI custom
 ```
-```
+````
 
-```md
+````md
 ```success
 Patch hoạt động ngon
 ```
-```
+````
 
-```md
+````md
 ```lua
 print("lol")
 ```
-```
+````
