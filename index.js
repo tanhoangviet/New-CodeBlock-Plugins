@@ -1,5 +1,5 @@
 (() => {
-  const PATCH_KEY = "__novaMarkdownBlocksV7";
+  const PATCH_KEY = "__novaMarkdownBlocksV8";
 
   function root() {
     if (typeof globalThis !== "undefined") return globalThis;
@@ -53,18 +53,19 @@
     try { return RN?.StyleSheet?.create ? RN.StyleSheet.create(raw) : raw; } catch (_) { return raw; }
   }
 
-  function createBox(React, RN) {
+  function createBox(React, RN, createElement) {
     const styles = makeStyles(RN);
+    const h = createElement || React.createElement;
     return function Box(node, key) {
       const kind = getKind(node?.lang);
       if (!kind) return null;
       const warn = kind === "warn";
       const success = kind === "success";
-      return React.createElement(
+      return h(
         RN.View,
         { key, style: [styles.box, warn && styles.warn, success && styles.success] },
-        React.createElement(RN.Text, { style: [styles.title, warn && styles.warnTitle, success && styles.successTitle] }, warn ? "Warning" : success ? "Success" : "Info"),
-        React.createElement(RN.Text, { style: styles.body }, String(node?.content || "")),
+        h(RN.Text, { style: [styles.title, warn && styles.warnTitle, success && styles.successTitle] }, warn ? "Warning" : success ? "Success" : "Info"),
+        h(RN.Text, { style: styles.body }, String(node?.content || "")),
       );
     };
   }
@@ -86,28 +87,49 @@
         return true;
       }
 
-      const Box = createBox(React, RN);
-      const store = { loaded: true, old: {}, oldRuleReact: md.defaultRules?.codeBlock?.react, patchedRules: typeof WeakSet !== "undefined" ? new WeakSet() : null };
+      const store = {
+        loaded: true,
+        old: {},
+        oldRuleReact: md.defaultRules?.codeBlock?.react,
+        oldCreateElement: React.createElement,
+        patchedRules: typeof WeakSet !== "undefined" ? new WeakSet() : null,
+        createElementHits: 0,
+      };
+      const Box = createBox(React, RN, store.oldCreateElement);
+
+      function customFromNode(node, key) {
+        if (node?.type === "codeBlock") return Box(node, key);
+        return null;
+      }
 
       function patchRules(rules) {
         if (!rules?.codeBlock || typeof rules.codeBlock.react !== "function") return rules;
         if (store.patchedRules?.has(rules)) return rules;
         const oldReact = rules.codeBlock.react;
         rules.codeBlock.react = function patchedCodeBlock(node, output, state) {
-          const custom = Box(node, state?.key);
+          const custom = customFromNode(node, state?.key);
           return custom || oldReact.call(this, node, output, state);
         };
         store.patchedRules?.add(rules);
         return rules;
       }
 
+      function patchAllRuleObjects() {
+        try {
+          Object.keys(md).forEach((key) => {
+            const value = md[key];
+            if (value?.codeBlock?.react) patchRules(value);
+          });
+        } catch (_) {}
+        patchRules(md.defaultRules);
+        patchRules(md.defaultReactRules);
+      }
+
       function deepReplace(value) {
         if (Array.isArray(value)) return value.map(deepReplace);
         const node = value?.props?.node;
-        if (node?.type === "codeBlock") {
-          const custom = Box(node, value?.key);
-          if (custom) return custom;
-        }
+        const custom = customFromNode(node, value?.key);
+        if (custom) return custom;
         const children = value?.props?.children;
         if (children && React.cloneElement) {
           const next = deepReplace(children);
@@ -124,14 +146,29 @@
         md[name] = maker(store.old[name]);
       }
 
+      patchAllRuleObjects();
+
+      React.createElement = function patchedCreateElement(type, props, ...children) {
+        const node = props?.node;
+        const custom = customFromNode(node, props?.key);
+        if (custom) {
+          store.createElementHits++;
+          return custom;
+        }
+        return store.oldCreateElement.call(this, type, props, ...children);
+      };
+
       if (md.defaultRules?.codeBlock?.react) {
         md.defaultRules.codeBlock.react = function patchedDefault(node, output, state) {
-          const custom = Box(node, state?.key);
+          const custom = customFromNode(node, state?.key);
           return custom || store.oldRuleReact.call(this, node, output, state);
         };
       }
 
-      wrap("createReactRules", (old) => function patchedCreateReactRules(...args) { return patchRules(old.apply(this, args)); });
+      wrap("createReactRules", (old) => function patchedCreateReactRules(...args) {
+        const rules = old.apply(this, args);
+        return patchRules(rules);
+      });
       wrap("reactParserFor", (old) => function patchedReactParserFor(rules, ...rest) {
         patchRules(rules);
         const parser = old.call(this, rules, ...rest);
@@ -148,10 +185,11 @@
     },
 
     restore() {
-      const { md } = getModules();
+      const { md, React } = getModules();
       const store = md?.[PATCH_KEY];
       if (!md || !store) return false;
       for (const [name, fn] of Object.entries(store.old || {})) md[name] = fn;
+      if (React && store.oldCreateElement) React.createElement = store.oldCreateElement;
       if (md.defaultRules?.codeBlock && store.oldRuleReact) md.defaultRules.codeBlock.react = store.oldRuleReact;
       delete md[PATCH_KEY];
       api.loaded = false;
@@ -161,6 +199,7 @@
 
     debug() {
       const { metro, md, React, RN } = getModules();
+      const store = md?.[PATCH_KEY];
       return [
         `loaded=${api.loaded}`,
         `result=${api.lastResult}`,
@@ -172,6 +211,8 @@
         `createReactRules=${typeof md?.createReactRules}`,
         `reactParserFor=${typeof md?.reactParserFor}`,
         `codeBlockReact=${typeof md?.defaultRules?.codeBlock?.react}`,
+        `createElementHooked=${!!store?.oldCreateElement}`,
+        `createElementHits=${store?.createElementHits || 0}`,
       ].join("\n");
     },
   };
@@ -193,32 +234,33 @@
     const { React, RN } = getModules();
     if (!React || !RN?.View || !RN?.Text) return null;
     const styles = makeStyles(RN);
-    const Box = createBox(React, RN);
+    const realCreateElement = React.__novaOriginalCreateElement || React.createElement;
+    const Box = createBox(React, RN, realCreateElement);
     const Root = RN.ScrollView || RN.View;
-    return React.createElement(
+    return realCreateElement(
       Root,
       { style: styles.root },
-      React.createElement(RN.Text, { style: styles.h1 }, "Nova Markdown Blocks"),
-      React.createElement(RN.Text, { style: styles.p }, "Custom local UI cards for Discord Markdown code blocks."),
-      React.createElement(RN.View, { style: styles.section },
-        React.createElement(RN.Text, { style: styles.h1 }, "Preview"),
+      realCreateElement(RN.Text, { style: styles.h1 }, "Nova Markdown Blocks"),
+      realCreateElement(RN.Text, { style: styles.p }, "Custom local UI cards for Discord Markdown code blocks."),
+      realCreateElement(RN.View, { style: styles.section },
+        realCreateElement(RN.Text, { style: styles.h1 }, "Preview"),
         Box({ lang: "info", content: "Hello info box" }, "info-preview"),
         Box({ lang: "warn", content: "Cảnh báo test UI custom" }, "warn-preview"),
         Box({ lang: "success", content: "Patch hoạt động ngon" }, "success-preview"),
       ),
-      React.createElement(RN.View, { style: styles.section },
-        React.createElement(RN.Text, { style: styles.h1 }, "Markdown"),
-        React.createElement(RN.Text, { style: styles.code }, "```info\nHello info box\n```"),
-        React.createElement(RN.Text, { style: styles.code }, "```warn\nCảnh báo test UI custom\n```"),
-        React.createElement(RN.Text, { style: styles.code }, "```success\nPatch hoạt động ngon\n```"),
+      realCreateElement(RN.View, { style: styles.section },
+        realCreateElement(RN.Text, { style: styles.h1 }, "Markdown"),
+        realCreateElement(RN.Text, { style: styles.code }, "```info\nHello info box\n```"),
+        realCreateElement(RN.Text, { style: styles.code }, "```warn\nCảnh báo test UI custom\n```"),
+        realCreateElement(RN.Text, { style: styles.code }, "```success\nPatch hoạt động ngon\n```"),
       ),
-      React.createElement(RN.View, { style: styles.section },
-        React.createElement(RN.Text, { style: styles.h1 }, "Status"),
-        React.createElement(RN.Text, { style: styles.small }, api.debug()),
+      realCreateElement(RN.View, { style: styles.section },
+        realCreateElement(RN.Text, { style: styles.h1 }, "Status"),
+        realCreateElement(RN.Text, { style: styles.small }, api.debug()),
       ),
-      React.createElement(RN.View, { style: styles.section },
-        React.createElement(RN.Text, { style: styles.h1 }, "Credits"),
-        React.createElement(RN.Text, { style: styles.p }, "Made by ChatGPT for Nova Hoang."),
+      realCreateElement(RN.View, { style: styles.section },
+        realCreateElement(RN.Text, { style: styles.h1 }, "Credits"),
+        realCreateElement(RN.Text, { style: styles.p }, "Made by ChatGPT for Nova Hoang."),
       ),
     );
   }
