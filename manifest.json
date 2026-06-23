@@ -1,0 +1,15 @@
+{
+  "name": "Nova Markdown Blocks",
+  "description": "Render custom local UI cards from Discord Markdown code blocks like info, warn, and success.",
+  "authors": [
+    {
+      "name": "Nova Hoang",
+      "id": "tanhoangviet"
+    }
+  ],
+  "main": "index.js",
+  "vendetta": {
+    "icon": "ic_badge_staff"
+  },
+  "version": "1.0.0"
+}
