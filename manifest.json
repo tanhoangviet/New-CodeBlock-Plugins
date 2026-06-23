@@ -1,6 +1,6 @@
 {
-  "name": "Nova Markdown Blocks V7",
-  "description": "Custom Markdown cards with preview and debug settings.",
+  "name": "Nova Markdown Blocks V8",
+  "description": "Custom Markdown cards with preview, debug settings, and React render hook.",
   "authors": [
     {
       "name": "Nova Hoang",
@@ -12,7 +12,7 @@
     }
   ],
   "main": "index.js",
-  "hash": "v7-3b916ea",
+  "hash": "v8-05224d9",
   "vendetta": {
     "icon": "ic_badge_staff"
   }
