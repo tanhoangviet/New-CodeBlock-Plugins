@@ -1,5 +1,5 @@
 (() => {
-  const PATCH_KEY = "__novaMarkdownBlocksV9";
+  const PATCH_KEY = "__novaMarkdownBlocksV10";
 
   function root() {
     if (typeof globalThis !== "undefined") return globalThis;
@@ -16,11 +16,55 @@
     try { return metro?.findByProps?.(...props) || null; } catch (_) { return null; }
   }
 
+  function unique(list) {
+    const out = [];
+    for (const x of list) if (x && !out.includes(x)) out.push(x);
+    return out;
+  }
+
+  function isMarkdownModule(x) {
+    return !!x && typeof x === "object" && (
+      (typeof x.parse === "function" && (x.defaultRules || x.createReactRules || x.reactParserFor)) ||
+      (typeof x.createReactRules === "function" && typeof x.reactParserFor === "function") ||
+      !!x.defaultRules?.codeBlock?.react ||
+      !!x.defaultReactRules?.codeBlock?.react
+    );
+  }
+
+  function getAllMarkdownModules(metro) {
+    const list = [];
+    list.push(byProps(metro, "createReactRules", "reactParserFor", "parse"));
+    list.push(byProps(metro, "parse", "parseTopic"));
+
+    try {
+      const ex = metro?.findAllExports?.((x) => isMarkdownModule(x)) || [];
+      list.push(...ex);
+    } catch (_) {}
+
+    try {
+      const mods = metro?.findAllModule?.((m) => {
+        try {
+          if (isMarkdownModule(m)) return true;
+          if (isMarkdownModule(m?.defaultExport)) return true;
+          if (isMarkdownModule(m?.default)) return true;
+        } catch (_) {}
+        return false;
+      }) || [];
+      for (const m of mods) {
+        if (isMarkdownModule(m)) list.push(m);
+        if (isMarkdownModule(m?.defaultExport)) list.push(m.defaultExport);
+        if (isMarkdownModule(m?.default)) list.push(m.default);
+      }
+    } catch (_) {}
+
+    return unique(list);
+  }
+
   function getModules() {
     const metro = getMetro();
     return {
       metro,
-      md: byProps(metro, "createReactRules", "reactParserFor", "parse") || byProps(metro, "parse", "parseTopic"),
+      mds: getAllMarkdownModules(metro),
       React: byProps(metro, "createElement", "cloneElement") || byProps(metro, "createElement", "useState"),
       RN: byProps(metro, "ScrollView", "View", "Text", "StyleSheet") || byProps(metro, "View", "Text", "StyleSheet") || byProps(metro, "Text", "View"),
     };
@@ -74,7 +118,7 @@
         RN.View,
         { key, style: [styles.box, warn && styles.warn, success && styles.success] },
         h(RN.Text, { style: [styles.title, warn && styles.warnTitle, success && styles.successTitle] }, warn ? "Warning" : success ? "Success" : "Info"),
-        h(RN.Text, { style: styles.body }, String(node?.content || node?.children || node?.text || "")),
+        h(RN.Text, { style: styles.body }, String(node?.content || node?.text || node?.value || "")),
       );
     };
   }
@@ -83,212 +127,212 @@
     loaded: false,
     lastResult: "not loaded",
     lastError: null,
+    stores: [],
+    factoryStore: null,
 
     patch() {
-      const { metro, md, React, RN } = getModules();
-      if (!md || !React || !RN?.View || !RN?.Text) {
-        api.lastResult = `missing md=${!!md} React=${!!React} RN=${!!RN}`;
+      const { metro, mds, React, RN } = getModules();
+      if (!metro || !React || !RN?.View || !RN?.Text || !mds.length) {
+        api.lastResult = `missing metro=${!!metro} mds=${mds.length} React=${!!React} RN=${!!RN}`;
         return false;
       }
-      if (md[PATCH_KEY]?.loaded) {
-        api.loaded = true;
-        api.lastResult = "already patched";
-        return true;
-      }
 
-      const store = {
-        loaded: true,
-        old: {},
-        oldRuleReact: md.defaultRules?.codeBlock?.react,
-        oldCreateElement: React.createElement,
-        patchedRules: typeof WeakSet !== "undefined" ? new WeakSet() : null,
-        patchedFactories: [],
-        factoryHits: 0,
-        looseHits: 0,
-      };
-      const Box = createBox(React, RN, store.oldCreateElement);
+      const realCreateElement = React.createElement;
+      const Box = createBox(React, RN, realCreateElement);
 
       function nodeFromProps(type, props) {
         const node = props?.node;
         if (node?.type === "codeBlock") return node;
-
         const name = typeName(type).toLowerCase();
         const lang = props?.lang || props?.language || props?.syntax || props?.lexer;
         const content = props?.content || props?.text || props?.value || props?.children;
-        if (lang && getKind(lang) && content && name.includes("code")) {
-          return { type: "codeBlock", lang, content };
-        }
-
+        if (lang && getKind(lang) && content && name.includes("code")) return { type: "codeBlock", lang, content };
         return null;
       }
 
-      function customFromNode(node, key) {
-        if (node?.type === "codeBlock") return Box(node, key);
-        return null;
+      function customFromNode(node, key, store) {
+        if (node?.type !== "codeBlock") return null;
+        const custom = Box(node, key);
+        if (custom && store) store.ruleHits++;
+        return custom;
       }
 
-      function customFromFactoryCall(type, props) {
-        const node = nodeFromProps(type, props);
-        const custom = customFromNode(node, props?.key);
-        if (custom) {
-          if (!props?.node) store.looseHits++;
-          return custom;
-        }
-        return null;
-      }
+      function makeDeepReplace(store) {
+        return function deepReplace(value) {
+          if (Array.isArray(value)) return value.map(deepReplace);
 
-      function patchRules(rules) {
-        if (!rules?.codeBlock || typeof rules.codeBlock.react !== "function") return rules;
-        if (store.patchedRules?.has(rules)) return rules;
-        const oldReact = rules.codeBlock.react;
-        rules.codeBlock.react = function patchedCodeBlock(node, output, state) {
-          const custom = customFromNode(node, state?.key);
-          return custom || oldReact.call(this, node, output, state);
-        };
-        store.patchedRules?.add(rules);
-        return rules;
-      }
-
-      function patchAllRuleObjects() {
-        try {
-          Object.keys(md).forEach((key) => {
-            const value = md[key];
-            if (value?.codeBlock?.react) patchRules(value);
-          });
-        } catch (_) {}
-        patchRules(md.defaultRules);
-        patchRules(md.defaultReactRules);
-      }
-
-      function deepReplace(value) {
-        if (Array.isArray(value)) return value.map(deepReplace);
-        const custom = customFromFactoryCall(value?.type, value?.props);
-        if (custom) return custom;
-        const children = value?.props?.children;
-        if (children && React.cloneElement) {
-          const next = deepReplace(children);
-          if (next !== children) {
-            try { return React.cloneElement(value, value.props, next); } catch (_) {}
+          if (value?.type === "codeBlock") {
+            const custom = customFromNode(value, undefined, store);
+            if (custom) return custom;
           }
-        }
-        return value;
-      }
 
-      function wrap(name, maker) {
-        if (typeof md[name] !== "function") return;
-        if (!store.old[name]) store.old[name] = md[name];
-        md[name] = maker(store.old[name]);
+          const direct = customFromNode(value?.props?.node, value?.key, store) || customFromNode(nodeFromProps(value?.type, value?.props), value?.key, store);
+          if (direct) return direct;
+
+          const children = value?.props?.children;
+          if (children && React.cloneElement) {
+            const next = deepReplace(children);
+            if (next !== children) {
+              try { return React.cloneElement(value, value.props, next); } catch (_) {}
+            }
+          }
+          return value;
+        };
       }
 
       function patchFactoryObject(obj, key, label) {
         if (!obj || typeof obj[key] !== "function") return;
-        if (store.patchedFactories.some((x) => x.obj === obj && x.key === key)) return;
+        if (api.factoryStore?.patched?.some((x) => x.obj === obj && x.key === key)) return;
+        if (!api.factoryStore) api.factoryStore = { patched: [], hits: 0, looseHits: 0 };
 
         const old = obj[key];
         obj[key] = function patchedFactory(type, props, ...rest) {
           try {
-            const custom = customFromFactoryCall(type, props);
+            const node = nodeFromProps(type, props);
+            const custom = node?.type === "codeBlock" ? Box(node, props?.key) : null;
             if (custom) {
-              store.factoryHits++;
+              api.factoryStore.hits++;
+              if (!props?.node) api.factoryStore.looseHits++;
               return custom;
             }
           } catch (_) {}
           return old.apply(this, [type, props, ...rest]);
         };
-
-        store.patchedFactories.push({ obj, key, old, label });
+        api.factoryStore.patched.push({ obj, key, old, label });
       }
 
-      function patchAllFactories() {
+      function patchFactories() {
         patchFactoryObject(React, "createElement", "React.createElement");
-
-        let exports = [];
         try {
-          exports = metro?.findAllExports?.((x) => {
-            try {
-              return !!x && typeof x === "object" && (
-                typeof x.createElement === "function" ||
-                typeof x.jsx === "function" ||
-                typeof x.jsxs === "function" ||
-                typeof x.jsxDEV === "function"
-              );
-            } catch (_) {
-              return false;
-            }
-          }) || [];
-        } catch (_) {
-          exports = [];
+          const ex = metro?.findAllExports?.((x) => x && typeof x === "object" && (
+            typeof x.createElement === "function" || typeof x.jsx === "function" || typeof x.jsxs === "function" || typeof x.jsxDEV === "function"
+          )) || [];
+          ex.forEach((obj, i) => {
+            patchFactoryObject(obj, "createElement", `export.${i}.createElement`);
+            patchFactoryObject(obj, "jsx", `export.${i}.jsx`);
+            patchFactoryObject(obj, "jsxs", `export.${i}.jsxs`);
+            patchFactoryObject(obj, "jsxDEV", `export.${i}.jsxDEV`);
+          });
+        } catch (_) {}
+      }
+
+      function patchMarkdownModule(md, index) {
+        if (!md || md[PATCH_KEY]?.loaded) return md?.[PATCH_KEY] || null;
+
+        const store = {
+          loaded: true,
+          index,
+          md,
+          old: {},
+          patchedRules: typeof WeakSet !== "undefined" ? new WeakSet() : null,
+          ruleHits: 0,
+          parserHits: 0,
+          rulesPatched: 0,
+        };
+        const deepReplace = makeDeepReplace(store);
+
+        function patchRules(rules) {
+          if (!rules?.codeBlock || typeof rules.codeBlock.react !== "function") return rules;
+          if (store.patchedRules?.has(rules)) return rules;
+          const oldReact = rules.codeBlock.react;
+          rules.codeBlock.react = function patchedCodeBlock(node, output, state) {
+            const custom = customFromNode(node, state?.key, store);
+            return custom || oldReact.call(this, node, output, state);
+          };
+          store.patchedRules?.add(rules);
+          store.rulesPatched++;
+          return rules;
         }
 
-        exports.forEach((obj, i) => {
-          patchFactoryObject(obj, "createElement", "export." + i + ".createElement");
-          patchFactoryObject(obj, "jsx", "export." + i + ".jsx");
-          patchFactoryObject(obj, "jsxs", "export." + i + ".jsxs");
-          patchFactoryObject(obj, "jsxDEV", "export." + i + ".jsxDEV");
+        function patchAllRuleObjects() {
+          try {
+            Object.keys(md).forEach((key) => {
+              const value = md[key];
+              if (value?.codeBlock?.react) patchRules(value);
+            });
+          } catch (_) {}
+          patchRules(md.defaultRules);
+          patchRules(md.defaultReactRules);
+          patchRules(md.guildEventRules);
+          patchRules(md.notifCenterV2MessagePreviewRules);
+          patchRules(md.lockscreenWidgetMessageRules);
+        }
+
+        function wrap(name, maker) {
+          if (typeof md[name] !== "function") return;
+          if (!store.old[name]) store.old[name] = md[name];
+          md[name] = maker(store.old[name]);
+        }
+
+        patchAllRuleObjects();
+
+        wrap("createReactRules", (old) => function patchedCreateReactRules(...args) {
+          const rules = old.apply(this, args);
+          return patchRules(rules);
         });
+
+        wrap("reactParserFor", (old) => function patchedReactParserFor(rules, ...rest) {
+          patchRules(rules);
+          const parser = old.call(this, rules, ...rest);
+          return typeof parser === "function" ? function patchedParser(...args) { store.parserHits++; return deepReplace(parser.apply(this, args)); } : parser;
+        });
+
+        ["parse", "parseTopic", "parseVoiceChannelStatus", "parseEmbedTitle", "parseEmbedTitleWithoutLinks", "parseInlineReply", "parseGuildVerificationFormRule", "parseGuildEventDescription", "parseAutoModerationSystemMessage", "parseForumPostGuidelines"].forEach((name) => {
+          wrap(name, (old) => function patchedMarkdownParser(...args) {
+            store.parserHits++;
+            return deepReplace(old.apply(this, args));
+          });
+        });
+
+        md[PATCH_KEY] = store;
+        api.stores.push(store);
+        return store;
       }
 
-      patchAllRuleObjects();
-      patchAllFactories();
+      patchFactories();
+      mds.forEach((md, i) => patchMarkdownModule(md, i));
 
-      if (md.defaultRules?.codeBlock?.react) {
-        md.defaultRules.codeBlock.react = function patchedDefault(node, output, state) {
-          const custom = customFromNode(node, state?.key);
-          return custom || store.oldRuleReact.call(this, node, output, state);
-        };
-      }
-
-      wrap("createReactRules", (old) => function patchedCreateReactRules(...args) {
-        const rules = old.apply(this, args);
-        return patchRules(rules);
-      });
-      wrap("reactParserFor", (old) => function patchedReactParserFor(rules, ...rest) {
-        patchRules(rules);
-        const parser = old.call(this, rules, ...rest);
-        return typeof parser === "function" ? function patchedParser(...args) { return deepReplace(parser.apply(this, args)); } : parser;
-      });
-      ["parse", "parseTopic", "parseVoiceChannelStatus", "parseEmbedTitle", "parseEmbedTitleWithoutLinks", "parseInlineReply", "parseGuildVerificationFormRule", "parseGuildEventDescription", "parseAutoModerationSystemMessage", "parseForumPostGuidelines"].forEach((name) => {
-        wrap(name, (old) => function patchedMarkdownParser(...args) { return deepReplace(old.apply(this, args)); });
-      });
-
-      md[PATCH_KEY] = store;
       api.loaded = true;
-      api.lastResult = "patched";
+      api.lastResult = `patched ${api.stores.length}/${mds.length} markdown modules`;
       return true;
     },
 
     restore() {
-      const { md } = getModules();
-      const store = md?.[PATCH_KEY];
-      if (!md || !store) return false;
-      for (const [name, fn] of Object.entries(store.old || {})) md[name] = fn;
-      for (const item of store.patchedFactories || []) {
+      for (const store of api.stores || []) {
+        const md = store.md;
+        for (const [name, fn] of Object.entries(store.old || {})) md[name] = fn;
+        delete md[PATCH_KEY];
+      }
+      for (const item of api.factoryStore?.patched || []) {
         try { item.obj[item.key] = item.old; } catch (_) {}
       }
-      if (md.defaultRules?.codeBlock && store.oldRuleReact) md.defaultRules.codeBlock.react = store.oldRuleReact;
-      delete md[PATCH_KEY];
+      api.stores = [];
+      api.factoryStore = null;
       api.loaded = false;
       api.lastResult = "restored";
       return true;
     },
 
     debug() {
-      const { metro, md, React, RN } = getModules();
-      const store = md?.[PATCH_KEY];
+      const { metro, mds, React, RN } = getModules();
+      const parserHits = api.stores.reduce((n, s) => n + (s.parserHits || 0), 0);
+      const ruleHits = api.stores.reduce((n, s) => n + (s.ruleHits || 0), 0);
+      const rulesPatched = api.stores.reduce((n, s) => n + (s.rulesPatched || 0), 0);
       return [
         `loaded=${api.loaded}`,
         `result=${api.lastResult}`,
         `error=${api.lastError || "none"}`,
         `metro=${!!metro}`,
-        `md=${!!md}`,
+        `markdownModulesFound=${mds.length}`,
+        `markdownModulesPatched=${api.stores.length}`,
         `React=${!!React}`,
         `RN=${!!RN}`,
-        `createReactRules=${typeof md?.createReactRules}`,
-        `reactParserFor=${typeof md?.reactParserFor}`,
-        `codeBlockReact=${typeof md?.defaultRules?.codeBlock?.react}`,
-        `factoriesPatched=${store?.patchedFactories?.length || 0}`,
-        `factoryHits=${store?.factoryHits || 0}`,
-        `looseHits=${store?.looseHits || 0}`,
+        `rulesPatched=${rulesPatched}`,
+        `parserHits=${parserHits}`,
+        `ruleHits=${ruleHits}`,
+        `factoriesPatched=${api.factoryStore?.patched?.length || 0}`,
+        `factoryHits=${api.factoryStore?.hits || 0}`,
+        `looseHits=${api.factoryStore?.looseHits || 0}`,
       ].join("\n");
     },
   };
@@ -310,33 +354,33 @@
     const { React, RN } = getModules();
     if (!React || !RN?.View || !RN?.Text) return null;
     const styles = makeStyles(RN);
-    const realCreateElement = React.createElement;
-    const Box = createBox(React, RN, realCreateElement);
+    const h = React.createElement;
+    const Box = createBox(React, RN, h);
     const Root = RN.ScrollView || RN.View;
-    return realCreateElement(
+    return h(
       Root,
       { style: styles.root },
-      realCreateElement(RN.Text, { style: styles.h1 }, "Nova Markdown Blocks"),
-      realCreateElement(RN.Text, { style: styles.p }, "Custom local UI cards for Discord Markdown code blocks."),
-      realCreateElement(RN.View, { style: styles.section },
-        realCreateElement(RN.Text, { style: styles.h1 }, "Preview"),
+      h(RN.Text, { style: styles.h1 }, "Nova Markdown Blocks"),
+      h(RN.Text, { style: styles.p }, "Custom local UI cards for Discord Markdown code blocks."),
+      h(RN.View, { style: styles.section },
+        h(RN.Text, { style: styles.h1 }, "Preview"),
         Box({ lang: "info", content: "Hello info box" }, "info-preview"),
         Box({ lang: "warn", content: "Cảnh báo test UI custom" }, "warn-preview"),
         Box({ lang: "success", content: "Patch hoạt động ngon" }, "success-preview"),
       ),
-      realCreateElement(RN.View, { style: styles.section },
-        realCreateElement(RN.Text, { style: styles.h1 }, "Markdown"),
-        realCreateElement(RN.Text, { style: styles.code }, "```info\nHello info box\n```"),
-        realCreateElement(RN.Text, { style: styles.code }, "```warn\nCảnh báo test UI custom\n```"),
-        realCreateElement(RN.Text, { style: styles.code }, "```success\nPatch hoạt động ngon\n```"),
+      h(RN.View, { style: styles.section },
+        h(RN.Text, { style: styles.h1 }, "Markdown"),
+        h(RN.Text, { style: styles.code }, "```info\nHello info box\n```"),
+        h(RN.Text, { style: styles.code }, "```warn\nCảnh báo test UI custom\n```"),
+        h(RN.Text, { style: styles.code }, "```success\nPatch hoạt động ngon\n```"),
       ),
-      realCreateElement(RN.View, { style: styles.section },
-        realCreateElement(RN.Text, { style: styles.h1 }, "Status"),
-        realCreateElement(RN.Text, { style: styles.small }, api.debug()),
+      h(RN.View, { style: styles.section },
+        h(RN.Text, { style: styles.h1 }, "Status"),
+        h(RN.Text, { style: styles.small }, api.debug()),
       ),
-      realCreateElement(RN.View, { style: styles.section },
-        realCreateElement(RN.Text, { style: styles.h1 }, "Credits"),
-        realCreateElement(RN.Text, { style: styles.p }, "Made by ChatGPT for Nova Hoang."),
+      h(RN.View, { style: styles.section },
+        h(RN.Text, { style: styles.h1 }, "Credits"),
+        h(RN.Text, { style: styles.p }, "Made by ChatGPT for Nova Hoang."),
       ),
     );
   }
