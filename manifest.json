@@ -1,13 +1,18 @@
 {
-  "name": "Nova Markdown Blocks",
-  "description": "Render custom local UI cards from Discord Markdown code blocks like info, warn, and success.",
+  "name": "Nova Markdown Blocks V6",
+  "description": "Custom Markdown cards with preview and debug settings.",
   "authors": [
     {
       "name": "Nova Hoang",
       "id": "tanhoangviet"
+    },
+    {
+      "name": "ChatGPT",
+      "id": "0"
     }
   ],
   "main": "index.js",
+  "hash": "v6-c28e904",
   "vendetta": {
     "icon": "ic_badge_staff"
   }
