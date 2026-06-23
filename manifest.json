@@ -1,5 +1,5 @@
 {
-  "name": "Nova Markdown Blocks V6",
+  "name": "Nova Markdown Blocks V7",
   "description": "Custom Markdown cards with preview and debug settings.",
   "authors": [
     {
@@ -12,7 +12,7 @@
     }
   ],
   "main": "index.js",
-  "hash": "v6-c28e904",
+  "hash": "v7-3b916ea",
   "vendetta": {
     "icon": "ic_badge_staff"
   }
