@@ -7,10 +7,8 @@
       "id": "tanhoangviet"
     }
   ],
-  "main": "index.js",
-  "hash": "2.0.0",
+  "main": "src/index.ts",
   "vendetta": {
     "icon": "ic_badge_staff"
-  },
-  "version": "2.0.0"
+  }
 }
